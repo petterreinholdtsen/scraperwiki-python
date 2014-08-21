@@ -1,13 +1,13 @@
 from collections import Iterable, Mapping
 from dumptruck import DumpTruck
 
+import logging
 import atexit
 import datetime
 import os
 import re
 import time
 import sys
-
 
 DATABASE_NAME = os.environ.get("SCRAPERWIKI_DATABASE_NAME", "scraperwiki.sqlite")
 DATABASE_TIMEOUT = float(os.environ.get("SCRAPERWIKI_DATABASE_TIMEOUT", 300))
@@ -47,15 +47,23 @@ class _Buffer(object):
 
     @classmethod
     def flush(cls):
+        logging.debug('FLUSH START: flushing = {}'.format(cls.flushing))
         if cls.flushing:
             raise RuntimeError("Double flush")
 
         if not cls.buffered_saves:
+            logging.debug("FLUSH END: nothing to flush")
             return
 
+        logging.debug("WE ARE REALLY FLUSHING")
         cls.flushing = True
 
-        real_save(cls.unique_keys, cls.buffered_saves, cls.buffered_table)
+        try:
+            real_save(cls.unique_keys, cls.buffered_saves, cls.buffered_table)
+        except Exception, e:
+            print ":("
+            print repr(e)
+            raise
 
         cls.unique_keys = None
         cls.buffered_table = None
@@ -67,10 +75,12 @@ class _Buffer(object):
         # It might be tempting to put this in a try-finally, but we *really*
         # aren't done until the above code has run.
         cls.flushing = False
+        logging.debug('FLUSH END')
 
     @classmethod
     def append(cls, unique_keys, data, table_name):
         if cls.unique_keys != unique_keys or cls.buffered_table != table_name:
+            logging.debug('append flush: different')
             cls.flush()
         cls.unique_keys = unique_keys
         cls.buffered_table = table_name
@@ -78,6 +88,7 @@ class _Buffer(object):
         if isinstance(data, Mapping):
             cls.buffered_saves.append(data)
             if len(cls.buffered_saves) >= cls.MAX_SIZE:
+                logging.debug('append flush: size {}')
                 cls.flush()
 
         elif isinstance(data, Iterable):
@@ -91,19 +102,23 @@ class _Buffer(object):
                     raise TypeError(cls.BAD_TYPE, type(datum))
                 append(datum)
                 if len(buffered_saves) >= MAX_SIZE:
+                    logging.debug('append flush: size []')
                     cls.flush()
         else:
             # Not mapping or iterable of mapping
             raise TypeError(cls.BAD_TYPE, type(data))
 
         if cls.flush_deadline < time.time():
-            # print "Flush deadline passed"
+            logging.debug('append flush: time')
             cls.flush()
+
+        logging.debug("exiting append, {}/{} ?".format(len(cls.buffered_saves), cls.MAX_SIZE))
 
 def flush():
     """
     Ensure that any buffered records are written out to sqlite
     """
+    logging.debug('module flush')
     _Buffer.flush()
 
 @atexit.register
@@ -117,19 +132,23 @@ def _finish():
         # The only way flushing can be true is if exit() is called during
         # flush(), in which case flushing won't work.
         return
-
+    
+    logging.debug('_finish flush')
     flush()
 
 _ORIG_EXCEPTHOOK = sys.excepthook
 def _excepthook(*args, **kwargs):
     # print "Flushing due to exception"
     if not _Buffer.flushing:
+        logging.debug('exception hook')
+        logging.debug('{!r}, {!r}'.format(args, kwargs))
         flush()
     return _ORIG_EXCEPTHOOK(*args, **kwargs)
 sys.excepthook = _excepthook
 
 def execute(sqlquery, data=[], verbose=1):
     """ Emulate scraperwiki as much as possible by mangling dumptruck result """
+    logging.debug('execute flush')
     flush()
 
     # Allow for a non-list to be passed as data.
@@ -160,10 +179,12 @@ def real_save(unique_keys, data, table_name="swdata", verbose=2, date=None):
     return dt.upsert(data, table_name = table_name)
 
 def commit(verbose=1):
+    logging.debug('commit flush')
     flush()
     dt.commit()
 
 def select(sqlquery, data=[], verbose=1):
+    logging.debug('select flush')
     flush()
     sqlquery = "select %s" % sqlquery   # maybe check if select or another command is there already?
     result = dt.execute(sqlquery, data, commit = False)
@@ -177,6 +198,7 @@ def select(sqlquery, data=[], verbose=1):
     return result
 
 def show_tables(dbname=""):
+    logging.debug('show_table flush')
     flush()
     name = "sqlite_master"
     if dbname:
@@ -185,6 +207,7 @@ def show_tables(dbname=""):
     return {row['name']: row['sql'] for row in response}
 
 def save_var(name, value, verbose=2):
+    logging.debug('save_var flush')
     flush()
     data = dt.save_var(name, value)
     dt.execute(u"CREATE TABLE IF NOT EXISTS swvariables (`value_blob` blob, `type` text, `name` text PRIMARY KEY)", commit = False)
@@ -194,6 +217,7 @@ def save_var(name, value, verbose=2):
     return data
 
 def get_var(name, default=None, verbose=2):
+    logging.debug('get_var flush')
     flush()
     if 'swvariables' not in show_tables(): # this should be unecessary
         return default
